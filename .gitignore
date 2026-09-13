@@ -1,0 +1,16 @@
+/build/
+/.tools/
+/scheduling.csv
+
+*.user
+*.suo
+*.VC.db
+
+/.vs/
+/out/
+/cmake-build-*/
+
+/test-logs/
+/src/gui/bin/
+/src/gui/obj/
+/dist/

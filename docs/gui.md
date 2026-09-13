@@ -1,0 +1,15 @@
+# GUI 使用说明
+
+`NarakaLatencyController.exe` 是 .NET 8 WPF 单页控制器。程序采用单实例模式并以 `asInvoker` 启动；非管理员打开时只显示设置并提供“以管理员身份重新启动”，不会自动弹出 UAC，也不会自动启动拦截。
+
+- Inbound 表示服务器到本机；Outbound 表示本机到服务器。
+- 两个方向有独立开关和 0.0–100.0 ms 数值，内部转换成微秒。
+- “上下行联动”只同步 GUI 数值，不改变核心的独立通道设计，默认关闭。
+- RTT 预设把附加 RTT 平均分到两个方向；仍可随后分别修改。
+- 开始后修改设置只影响新捕获封包，队列中的封包保持原 dueTime。
+- 停止、关闭窗口和系统睡眠均执行“停止并安全放行”；恢复后不会自动开始。
+- CSV 默认关闭。启用后写入 `%LOCALAPPDATA%\NarakaLatencyController\csv`。
+- 设置保存于 `%LOCALAPPDATA%\NarakaLatencyController\settings.json`，但绝不保存运行中状态。
+- 日志位于 `%LOCALAPPDATA%\NarakaLatencyController\logs`。
+
+只有至少一个方向启用且其延迟大于 0 时，“开始”按钮才可用。0 延迟方向在核心中直接旁路，不进入延迟堆。
