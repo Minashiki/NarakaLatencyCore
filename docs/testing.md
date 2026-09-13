@@ -13,6 +13,10 @@ ctest --test-dir build -C Release --output-on-failure
 
 GUI 冒烟测试可执行 `NarakaLatencyController.exe --smoke-test`。它初始化 C ABI、创建窗口并在一秒后安全关闭，不启动 WinDivert。
 
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test_hotkey.ps1` 会确认 `Ctrl+Shift+M` 起初可注册、GUI 最小化时由它占用、GUI 安全退出后释放；该测试不会开启全局延迟。
+
+`dotnet run --project tests\preset_model_tests\NarakaLatency.PresetTests.csproj -c Release` 运行 16 项自定义预设模型测试，在系统临时目录使用独立设置文件，不修改用户的真实 `settings.json`。
+
 ## 延迟解释
 
 `actualDelayUs = actualSendTime - captureTime`；`schedulingErrorUs = actualSendTime - dueTime`。普通调度路径不会故意提前发送。StopAndFlush 会忽略剩余 dueTime 以尽快恢复网络，因此 flush 记录不纳入调度误差分位数。

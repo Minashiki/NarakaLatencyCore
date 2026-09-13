@@ -9,9 +9,12 @@ public partial class App : Application
     private Mutex? _singleInstance;
     private bool _ownsSingleInstance;
     private MainWindow? _window;
+    internal bool IsSmokeTest { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        IsSmokeTest = e.Args.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase) ||
+            e.Args.Contains("--test-no-save", StringComparer.OrdinalIgnoreCase);
         _singleInstance = new Mutex(
             true, @"Global\NarakaLatencyController.Gui.v1", out var createdNew);
         _ownsSingleInstance = createdNew;

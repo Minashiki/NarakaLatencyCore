@@ -13,4 +13,6 @@
 /test-logs/
 /src/gui/bin/
 /src/gui/obj/
+/tests/preset_model_tests/bin/
+/tests/preset_model_tests/obj/
 /dist/

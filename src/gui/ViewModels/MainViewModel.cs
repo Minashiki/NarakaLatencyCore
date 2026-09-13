@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -18,10 +19,16 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     private bool _nativeAvailable;
     private bool _syncingLinkedValues;
     private bool _polling;
+    private bool _transitionInProgress;
+    private bool _applyingPreset;
     private string _lastDirection = "inbound";
+    private string _presetName = string.Empty;
+    private string _presetStatus = "保存当前上下行配置，之后可一键恢复。";
+    private SavedPreset? _selectedPreset;
     private MainWindow? _window;
     private NativeEngineState _state = NativeEngineState.Stopped;
     private string _errorText = string.Empty;
+    private string _hotkeyStatus = "后台快捷键 Ctrl+Shift+M：注册中";
     private ulong _queueDepth;
     private ulong _sendFailures;
     private double _p95Error;
@@ -31,12 +38,22 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     internal MainViewModel()
     {
         _settings = SettingsStore.Load();
+        SavedPresets = new ObservableCollection<SavedPreset>(
+            _settings.Presets.Select(preset => preset.Copy()));
         IsAdministrator = CheckAdministrator();
         StartCommand = new AsyncRelayCommand(StartAsync, CanStart);
         StopCommand = new AsyncRelayCommand(StopAsync, CanStop);
         ResetMetricsCommand = new RelayCommand(_ => ResetMetrics());
         RelaunchElevatedCommand = new RelayCommand(_ => RelaunchElevated(), _ => !IsAdministrator);
         ApplyPresetCommand = new RelayCommand(ApplyPreset);
+        SaveCurrentPresetCommand = new RelayCommand(
+            _ => SaveCurrentPreset(), _ => !_transitionInProgress && !_applyingPreset);
+        ApplySavedPresetCommand = new AsyncRelayCommand(
+            ApplySavedPresetAsync, () => SelectedPreset is not null &&
+                !_transitionInProgress && !_applyingPreset);
+        DeleteSavedPresetCommand = new RelayCommand(
+            _ => DeleteSelectedPreset(), _ => SelectedPreset is not null &&
+                !_transitionInProgress && !_applyingPreset);
         OpenLogDirectoryCommand = new RelayCommand(_ => OpenLogDirectory());
 
         try
@@ -159,6 +176,29 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     };
 
     public string ErrorText { get => _errorText; private set { _errorText = value; OnPropertyChanged(); } }
+    public ObservableCollection<SavedPreset> SavedPresets { get; }
+    public string PresetName
+    {
+        get => _presetName;
+        set { _presetName = value; OnPropertyChanged(); }
+    }
+    public SavedPreset? SelectedPreset
+    {
+        get => _selectedPreset;
+        set
+        {
+            _selectedPreset = value;
+            OnPropertyChanged();
+            if (value is not null) PresetName = value.Name;
+            CommandManager.InvalidateRequerySuggested();
+        }
+    }
+    public string PresetStatus
+    {
+        get => _presetStatus;
+        private set { _presetStatus = value; OnPropertyChanged(); }
+    }
+    public string HotkeyStatus { get => _hotkeyStatus; private set { _hotkeyStatus = value; OnPropertyChanged(); } }
     public ulong QueueDepth { get => _queueDepth; private set { _queueDepth = value; OnPropertyChanged(); } }
     public ulong SendFailures { get => _sendFailures; private set { _sendFailures = value; OnPropertyChanged(); } }
     public string P95ErrorDisplay => $"{_p95Error / 1000.0:F3} ms";
@@ -170,6 +210,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
     public ICommand ResetMetricsCommand { get; }
     public ICommand RelaunchElevatedCommand { get; }
     public ICommand ApplyPresetCommand { get; }
+    public ICommand SaveCurrentPresetCommand { get; }
+    public ICommand ApplySavedPresetCommand { get; }
+    public ICommand DeleteSavedPresetCommand { get; }
     public ICommand OpenLogDirectoryCommand { get; }
 
     internal void AttachWindow(MainWindow window)
@@ -182,6 +225,33 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    internal void SetHotkeyRegistrationResult(bool registered, int win32Error)
+    {
+        HotkeyStatus = registered
+            ? "后台快捷键 Ctrl+Shift+M：开启 / 安全停止（最小化时也有效）"
+            : $"后台快捷键 Ctrl+Shift+M 注册失败，可能已被其他程序占用（Win32 {win32Error}）";
+    }
+
+    internal void ToggleFromHotkey()
+    {
+        if (_transitionInProgress || _applyingPreset) return;
+        if (_state == NativeEngineState.Stopped)
+        {
+            if (StartCommand.CanExecute(null))
+                StartCommand.Execute(null);
+            else
+                ErrorText = !IsAdministrator
+                    ? "请先以管理员身份重新启动，才能用快捷键开启延迟。"
+                    : !_nativeAvailable
+                        ? "原生核心不可用，无法通过快捷键开启延迟。"
+                        : "请先设置至少一个已启用方向的非零延迟。";
+        }
+        else if (StopCommand.CanExecute(null))
+        {
+            StopCommand.Execute(null);
+        }
+    }
+
     internal async Task ShutdownAsync()
     {
         _metricsTimer.Stop();
@@ -190,7 +260,8 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             _settings.WindowLeft = _window.Left;
             _settings.WindowTop = _window.Top;
         }
-        SaveSettings();
+        if (Application.Current is not App { IsSmokeTest: true })
+            SaveSettings();
         if (_state is NativeEngineState.Running or NativeEngineState.Bypassing or NativeEngineState.Faulted)
         {
             await StopAsync();
@@ -204,72 +275,104 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         return StopAsync();
     }
 
-    private bool CanStart() => _nativeAvailable && IsAdministrator &&
+    private bool CanStart() => !_transitionInProgress && !_applyingPreset &&
+        _nativeAvailable && IsAdministrator &&
         _state == NativeEngineState.Stopped &&
         ((InboundEnabled && InboundDelayMs > 0) || (OutboundEnabled && OutboundDelayMs > 0));
 
-    private bool CanStop() => _state is NativeEngineState.Running or
-        NativeEngineState.Bypassing or NativeEngineState.Faulted;
+    private bool CanStop() => !_transitionInProgress && !_applyingPreset && _state is
+        (NativeEngineState.Running or NativeEngineState.Bypassing or NativeEngineState.Faulted);
 
     private async Task StartAsync()
     {
-        if (!IsAdministrator)
+        if (_transitionInProgress) return;
+        _transitionInProgress = true;
+        try
         {
-            ErrorText = "该程序需要管理员权限才能加载网络过滤驱动。";
-            return;
-        }
-        ErrorText = string.Empty;
-        _state = NativeEngineState.Starting;
-        NotifyState();
-        if (CsvEnabled)
-        {
-            Directory.CreateDirectory(SettingsStore.CsvDirectory);
-            var path = Path.Combine(SettingsStore.CsvDirectory,
-                $"scheduling-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
-            var csvResult = NativeMethods.nl_set_csv_path(path);
-            if (csvResult != NativeResult.Ok)
+            if (!IsAdministrator)
             {
-                ErrorText = $"CSV 初始化失败：{csvResult}";
-                _state = NativeEngineState.Stopped;
-                NotifyState();
+                ErrorText = "该程序需要管理员权限才能加载网络过滤驱动。";
                 return;
             }
-        }
-        else NativeMethods.nl_set_csv_path(string.Empty);
+            ErrorText = string.Empty;
+            _state = NativeEngineState.Starting;
+            NotifyState();
+            if (CsvEnabled)
+            {
+                Directory.CreateDirectory(SettingsStore.CsvDirectory);
+                var path = Path.Combine(SettingsStore.CsvDirectory,
+                    $"scheduling-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
+                var csvResult = NativeMethods.nl_set_csv_path(path);
+                if (csvResult != NativeResult.Ok)
+                {
+                    ErrorText = $"CSV 初始化失败：{csvResult}";
+                    _state = NativeEngineState.Stopped;
+                    NotifyState();
+                    return;
+                }
+            }
+            else NativeMethods.nl_set_csv_path(string.Empty);
 
-        var settings = CreateNativeSettings();
-        var result = await Task.Run(() => NativeMethods.nl_start(ref settings));
-        if (result != NativeResult.Ok)
-        {
-            ErrorText = $"启动失败（{result}）：{NativeMethods.GetLastError()}";
-            _state = NativeEngineState.Faulted;
+            var settings = CreateNativeSettings();
+            var result = await Task.Run(() => NativeMethods.nl_start(ref settings));
+            if (result != NativeResult.Ok)
+            {
+                ErrorText = $"启动失败（{result}）：{NativeMethods.GetLastError()}";
+                _state = NativeEngineState.Faulted;
+            }
+            else _state = NativeEngineState.Running;
+            NotifyState();
+            await RefreshMetricsAsync();
         }
-        else _state = NativeEngineState.Running;
-        NotifyState();
-        await RefreshMetricsAsync();
+        catch (Exception error)
+        {
+            ErrorText = $"启动失败：{error.Message}";
+            _state = NativeEngineState.Faulted;
+            NotifyState();
+        }
+        finally
+        {
+            _transitionInProgress = false;
+            CommandManager.InvalidateRequerySuggested();
+        }
     }
 
     private async Task StopAsync()
     {
-        if (_state == NativeEngineState.Stopped) return;
-        _state = NativeEngineState.Stopping;
-        NotifyState();
-        var result = await Task.Run(() => NativeMethods.nl_stop_and_flush(10_000));
-        if (result == NativeResult.Ok)
+        if (_transitionInProgress || _state == NativeEngineState.Stopped) return;
+        _transitionInProgress = true;
+        try
         {
-            _state = NativeEngineState.Stopped;
+            _state = NativeEngineState.Stopping;
+            NotifyState();
+            var result = await Task.Run(() => NativeMethods.nl_stop_and_flush(10_000));
+            if (result == NativeResult.Ok)
+            {
+                _state = NativeEngineState.Stopped;
+            }
+            else if (result == NativeResult.Timeout)
+            {
+                ErrorText = "安全停止仍在进行，未确认全部封包已放行。";
+            }
+            else
+            {
+                ErrorText = $"停止失败（{result}）：{NativeMethods.GetLastError()}";
+                _state = NativeEngineState.Faulted;
+            }
+            NotifyState();
+            await RefreshMetricsAsync();
         }
-        else if (result == NativeResult.Timeout)
+        catch (Exception error)
         {
-            ErrorText = "安全停止仍在进行，未确认全部封包已放行。";
-        }
-        else
-        {
-            ErrorText = $"停止失败（{result}）：{NativeMethods.GetLastError()}";
+            ErrorText = $"停止失败：{error.Message}";
             _state = NativeEngineState.Faulted;
+            NotifyState();
         }
-        NotifyState();
-        await RefreshMetricsAsync();
+        finally
+        {
+            _transitionInProgress = false;
+            CommandManager.InvalidateRequerySuggested();
+        }
     }
 
     private void ResetMetrics()
@@ -294,6 +397,99 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(InboundDelayMs));
         OnPropertyChanged(nameof(OutboundDelayMs));
         Changed(null);
+    }
+
+    private void SaveCurrentPreset()
+    {
+        var candidate = new SavedPreset
+        {
+            Name = PresetName,
+            InboundEnabled = InboundEnabled,
+            OutboundEnabled = OutboundEnabled,
+            InboundDelayMs = InboundDelayMs,
+            OutboundDelayMs = OutboundDelayMs,
+            LinkDirections = LinkDirections
+        };
+        if (!PresetCatalog.TryUpsert(
+            SavedPresets, candidate, out var stored, out var replaced, out var error))
+        {
+            PresetStatus = error;
+            return;
+        }
+        SelectedPreset = stored;
+        PresetStatus = !PersistPresets()
+            ? "预设已更新，但写入设置文件失败；下次启动可能无法恢复。"
+            : replaced ? $"已覆盖预设「{stored.Name}」。" : $"已保存预设「{stored.Name}」。";
+    }
+
+    private async Task ApplySavedPresetAsync()
+    {
+        if (SelectedPreset is null || _transitionInProgress || _applyingPreset) return;
+        _applyingPreset = true;
+        CommandManager.InvalidateRequerySuggested();
+        try
+        {
+            var preset = SelectedPreset.Copy();
+            if (_state == NativeEngineState.Faulted ||
+                (_state is NativeEngineState.Running or NativeEngineState.Bypassing &&
+                 !PresetCatalog.HasEffectiveDelay(preset)))
+            {
+                await StopAsync();
+                if (_state != NativeEngineState.Stopped)
+                {
+                    PresetStatus = "安全停止未完成，预设尚未应用。";
+                    return;
+                }
+            }
+            _settings.InboundEnabled = preset.InboundEnabled;
+            _settings.OutboundEnabled = preset.OutboundEnabled;
+            _settings.InboundDelayMs = preset.InboundDelayMs;
+            _settings.OutboundDelayMs = preset.OutboundDelayMs;
+            _settings.LinkDirections = preset.LinkDirections;
+            OnPropertyChanged(nameof(InboundEnabled));
+            OnPropertyChanged(nameof(OutboundEnabled));
+            OnPropertyChanged(nameof(InboundDelayMs));
+            OnPropertyChanged(nameof(OutboundDelayMs));
+            OnPropertyChanged(nameof(LinkDirections));
+            SaveSettings();
+            CommandManager.InvalidateRequerySuggested();
+            if (_state is NativeEngineState.Running or NativeEngineState.Bypassing &&
+                !await UpdateNativeSettingsAsync())
+            {
+                PresetStatus = $"已载入「{preset.Name}」，但运行中更新失败；请检查错误信息。";
+                return;
+            }
+            PresetStatus = PresetCatalog.HasEffectiveDelay(preset)
+                ? $"已应用预设「{preset.Name}」。"
+                : $"已应用预设「{preset.Name}」，延迟已安全停止。";
+        }
+        catch (Exception error)
+        {
+            PresetStatus = $"应用预设失败：{error.Message}";
+        }
+        finally
+        {
+            _applyingPreset = false;
+            CommandManager.InvalidateRequerySuggested();
+        }
+    }
+
+    private void DeleteSelectedPreset()
+    {
+        if (SelectedPreset is null) return;
+        var name = SelectedPreset.Name;
+        SavedPresets.Remove(SelectedPreset);
+        SelectedPreset = null;
+        PresetName = string.Empty;
+        PresetStatus = PersistPresets()
+            ? $"已删除预设「{name}」。"
+            : "预设已从当前列表删除，但写入设置文件失败。";
+    }
+
+    private bool PersistPresets()
+    {
+        _settings.Presets = SavedPresets.Select(preset => preset.Copy()).ToList();
+        return SaveSettings();
     }
 
     private void SetDelay(double value, bool inbound)
@@ -343,9 +539,9 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         _ = UpdateNativeSettingsAsync();
     }
 
-    private async Task UpdateNativeSettingsAsync()
+    private async Task<bool> UpdateNativeSettingsAsync()
     {
-        if (_state is not (NativeEngineState.Running or NativeEngineState.Bypassing)) return;
+        if (_state is not (NativeEngineState.Running or NativeEngineState.Bypassing)) return false;
         await _settingsUpdateGate.WaitAsync();
         try
         {
@@ -353,10 +549,12 @@ internal sealed class MainViewModel : INotifyPropertyChanged
             var result = await Task.Run(() => NativeMethods.nl_update_settings(ref settings));
             if (result != NativeResult.Ok)
                 ErrorText = $"运行时设置更新失败（{result}）：{NativeMethods.GetLastError()}";
+            return result == NativeResult.Ok;
         }
         catch (Exception error)
         {
             ErrorText = $"运行时设置更新失败：{error.Message}";
+            return false;
         }
         finally { _settingsUpdateGate.Release(); }
     }
@@ -454,7 +652,7 @@ internal sealed class MainViewModel : INotifyPropertyChanged
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 
-    private void SaveSettings() => SettingsStore.Save(_settings);
+    private bool SaveSettings() => SettingsStore.Save(_settings);
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));

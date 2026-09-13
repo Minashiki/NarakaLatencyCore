@@ -33,6 +33,10 @@ dotnet build src\gui\NarakaLatency.Gui.csproj -c Release
 
 推荐从发布目录以管理员身份运行 `NarakaLatencyController.exe`。默认配置为上下行均启用、延迟 0、上下行联动关闭、CSV 关闭；仅打开界面不会创建 WinDivert 拦截句柄。
 
+窗口最小化后可按全局 `Ctrl+Shift+M` 开启或安全停止延迟；关闭窗口则退出程序。快捷键只在程序仍运行时有效。
+
+“我的预设”可命名保存独立上下行开关、延迟及联动状态；选择预设后可应用、同名覆盖或删除。预设保存在用户的 `settings.json` 中，不自动开启延迟。
+
 控制台默认也只校验参数，不启动拦截：
 
 ```powershell

@@ -11,4 +11,5 @@ internal sealed class AppSettings
     public double? WindowTop { get; set; }
     public bool AdvancedPanelExpanded { get; set; }
     public bool CsvEnabled { get; set; }
+    public List<SavedPreset> Presets { get; set; } = [];
 }
